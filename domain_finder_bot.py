@@ -4,7 +4,6 @@ import os
 import re
 import sys
 import io
-import tempfile
 from telebot import types
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -21,11 +20,11 @@ user_data = {}
 # ---------------- MAIN MENU ----------------
 def send_main_menu(chat_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_upload = types.InlineKeyboardButton("📤 Upload File", callback_data="upload_file")
+    btn_upload = types.InlineKeyboardButton("📤 Add Link", callback_data="upload_file")
     btn_search = types.InlineKeyboardButton("🔍 Search", callback_data="search")
     btn_delete = types.InlineKeyboardButton("🗑 Delete", callback_data="delete")
     markup.add(btn_upload, btn_search, btn_delete)
-    bot.send_message(chat_id, "📌 Please choose an action:", reply_markup=markup)
+    bot.send_message(chat_id, "📌 Choose an action:", reply_markup=markup)
 
 # ---------------- START ----------------
 @bot.message_handler(commands=['start'])
@@ -36,15 +35,8 @@ def handle_start(message):
 
 # ---------------- RESET ----------------
 def reset_user(chat_id):
-    # Remove all stored files
-    if chat_id in user_data and 'files' in user_data[chat_id]:
-        for path in user_data[chat_id]['files'].values():
-            try:
-                os.remove(path)
-            except Exception:
-                pass
     user_states[chat_id] = None
-    user_data[chat_id] = {'files': {}}
+    user_data[chat_id] = {'links': {}, 'temp_url': None}
 
 # ---------------- CALLBACK HANDLER ----------------
 @bot.callback_query_handler(func=lambda call: True)
@@ -53,48 +45,43 @@ def callback_handler(call):
 
     if call.data == "upload_file":
         user_states[chat_id] = 'awaiting_url'
-        bot.send_message(chat_id, "📤 Send me the file URL to upload.")
+        bot.send_message(chat_id, "📤 Send me the file URL.")
 
     elif call.data == "search":
-        if user_data.get(chat_id, {}).get('files'):
-            user_states[chat_id] = 'awaiting_search_file'
+        if user_data.get(chat_id, {}).get('links'):
             choose_file_for_search(chat_id)
         else:
-            bot.send_message(chat_id, "⚠️ No file uploaded yet.")
+            bot.send_message(chat_id, "⚠️ No links added yet.")
             send_main_menu(chat_id)
 
     elif call.data == "delete":
-        files = user_data.get(chat_id, {}).get('files', {})
-        if not files:
-            bot.send_message(chat_id, "⚠️ No files to delete.")
+        links = user_data.get(chat_id, {}).get('links', {})
+        if not links:
+            bot.send_message(chat_id, "⚠️ No links to delete.")
             send_main_menu(chat_id)
         else:
             markup = types.InlineKeyboardMarkup()
-            for fname in files.keys():
+            for fname in links.keys():
                 markup.add(types.InlineKeyboardButton(f"🗑 {fname}", callback_data=f"delete_file:{fname}"))
-            bot.send_message(chat_id, "Select a file to delete:", reply_markup=markup)
+            bot.send_message(chat_id, "Select a link to delete:", reply_markup=markup)
 
     elif call.data.startswith("delete_file:"):
         fname = call.data.split("delete_file:")[1]
-        files = user_data.get(chat_id, {}).get('files', {})
-        if fname in files:
-            try:
-                os.remove(files[fname])
-            except Exception:
-                pass
-            del files[fname]
-            bot.send_message(chat_id, f"✅ File `{fname}` deleted.", parse_mode="Markdown")
+        links = user_data.get(chat_id, {}).get('links', {})
+        if fname in links:
+            del links[fname]
+            bot.send_message(chat_id, f"✅ Link `{fname}` removed.", parse_mode="Markdown")
         else:
-            bot.send_message(chat_id, "⚠️ File not found.")
+            bot.send_message(chat_id, "⚠️ Link not found.")
         send_main_menu(chat_id)
 
     elif call.data.startswith("search_file:"):
         fname = call.data.split("search_file:")[1]
-        if fname in user_data[chat_id]['files']:
+        if fname in user_data[chat_id]['links']:
             user_states[chat_id] = f"awaiting_domain:{fname}"
             bot.send_message(chat_id, f"🔍 Send me the domain to search in `{fname}`", parse_mode="Markdown")
         else:
-            bot.send_message(chat_id, "⚠️ File not found.")
+            bot.send_message(chat_id, "⚠️ Link not found.")
             send_main_menu(chat_id)
 
 # ---------------- FILE UPLOAD ----------------
@@ -107,96 +94,120 @@ def handle_url(message):
         bot.send_message(chat_id, "⚠️ Invalid URL. Must start with http:// or https://")
         return
 
-    try:
-        bot.send_message(chat_id, "⏳ Downloading file... Please wait.")
-        response = requests.get(url, stream=True, timeout=(10, 60))
-        response.raise_for_status()
+    # Store URL temporarily until we get the name
+    user_data[chat_id]['temp_url'] = url
+    user_states[chat_id] = 'awaiting_filename'
+    bot.send_message(chat_id, "✏️ What name do you want to give this file?")
 
-        file_name = os.path.basename(url.split("?")[0]) or f"file_{len(user_data[chat_id]['files'])+1}.txt"
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
-        for chunk in response.iter_content(chunk_size=1024*1024):
-            if chunk:
-                temp_file.write(chunk)
-        temp_file.close()
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == 'awaiting_filename')
+def handle_filename(message):
+    chat_id = message.chat.id
+    file_name = message.text.strip()
 
-        # Store file path
-        user_data[chat_id]['files'][file_name] = temp_file.name
+    if not file_name:
+        bot.send_message(chat_id, "⚠️ Name cannot be empty. Please enter a valid name.")
+        return
 
-        bot.send_message(chat_id, f"✅ File `{file_name}` downloaded and saved.", parse_mode="Markdown")
+    url = user_data[chat_id].pop('temp_url', None)
+    if not url:
+        bot.send_message(chat_id, "⚠️ No URL found. Please try again.")
         send_main_menu(chat_id)
+        return
 
-    except Exception as e:
-        bot.send_message(chat_id, f"❌ Error downloading file: {e}")
-        send_main_menu(chat_id)
+    # Save link with custom name
+    user_data[chat_id]['links'][file_name] = url
+    bot.send_message(chat_id, f"✅ Link saved as `{file_name}`", parse_mode="Markdown")
+    send_main_menu(chat_id)
 
 # ---------------- SEARCH ----------------
 def choose_file_for_search(chat_id):
     markup = types.InlineKeyboardMarkup()
-    for fname in user_data[chat_id]['files'].keys():
+    for fname in user_data[chat_id]['links'].keys():
         markup.add(types.InlineKeyboardButton(f"🔍 {fname}", callback_data=f"search_file:{fname}"))
-    bot.send_message(chat_id, "Select a file to search:", reply_markup=markup)
-
-def make_progress_bar(percent, size=20):
-    filled = int(size * percent / 100)
-    bar = "▓" * filled + "░" * (size - filled)
-    return f"[{bar}] {percent}%"
+    bot.send_message(chat_id, "Select a link to search:", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, "").startswith('awaiting_domain:'))
 def handle_domain_and_search(message):
     chat_id = message.chat.id
     state = user_states[chat_id]
     fname = state.split("awaiting_domain:")[1]
-    file_path = user_data[chat_id]['files'].get(fname)
+    url = user_data[chat_id]['links'].get(fname)
 
-    if not file_path:
-        bot.send_message(chat_id, "⚠️ File not found.")
+    if not url:
+        bot.send_message(chat_id, "⚠️ Link not found.")
         send_main_menu(chat_id)
         return
 
     target_domain = message.text.strip()
+    stream_search_with_live_progress(chat_id, url, target_domain, fname)
 
+def stream_search_with_live_progress(chat_id, url, target_domain, fname):
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
+        progress_msg = bot.send_message(chat_id, "⏳ Starting search...")
 
-        total_lines = len(lines)
-        bot.send_message(chat_id, f"🔍 Searching for `{target_domain}` in `{fname}` ({total_lines:,} lines)...",
-                         parse_mode="Markdown")
+        response = requests.get(url, stream=True, timeout=(10, 60))
+        response.raise_for_status()
+
+        total_bytes = int(response.headers.get('Content-Length', 0))
+        bytes_read = 0
+        lines_processed = 0
 
         found_lines_stream = io.BytesIO()
         found_lines_count = 0
-        step = max(1, total_lines // 10)
+        pattern = re.compile(r'\b' + re.escape(target_domain) + r'\b', re.IGNORECASE)
 
-        for i, line in enumerate(lines, start=1):
-            if re.search(r'\b' + re.escape(target_domain) + r'\b', line, re.IGNORECASE):
-                found_lines_stream.write(line.encode("utf-8"))
+        last_percent = 0
+        for chunk in response.iter_lines(decode_unicode=True):
+            if not chunk:
+                continue
+            lines_processed += 1
+            bytes_read += len(chunk.encode('utf-8')) + 1  # +1 for newline
+
+            if pattern.search(chunk):
+                found_lines_stream.write((chunk + "\n").encode("utf-8"))
                 found_lines_count += 1
 
-            if i % step == 0:
-                percent = int(i / total_lines * 100)
-                progress_bar = make_progress_bar(percent)
-                bot.send_message(chat_id, f"{progress_bar}\n📊 Found so far: {found_lines_count}")
+            if total_bytes > 0:
+                percent = int((bytes_read / total_bytes) * 100)
+                if percent >= last_percent + 5:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=progress_msg.message_id,
+                        text=f"📊 {percent}% done — found {found_lines_count}"
+                    )
+                    last_percent = percent
+            else:
+                # Fallback: update every 5000 lines
+                if lines_processed % 5000 == 0:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=progress_msg.message_id,
+                        text=f"📊 Processed {lines_processed:,} lines — found {found_lines_count}"
+                    )
+
+        # Final update
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=progress_msg.message_id,
+            text=f"✅ Search complete — found {found_lines_count} matches"
+        )
 
         if found_lines_count > 0:
-            bot.send_message(chat_id, f"✅ Search complete!\n📄 Total matches: *{found_lines_count}*",
-                             parse_mode="Markdown")
             found_lines_stream.seek(0)
             bot.send_document(
                 chat_id,
                 found_lines_stream,
                 visible_file_name=f"search_results_{target_domain}.txt",
-                caption=f"📄 Results for *{target_domain}* in `{fname}`",
+                caption=f"✅ Found {found_lines_count} matches for `{target_domain}` in `{fname}`",
                 parse_mode="Markdown"
             )
         else:
-            bot.send_message(chat_id, f"❌ No results for `{target_domain}` in `{fname}`.",
-                             parse_mode="Markdown")
+            bot.send_message(chat_id, f"❌ No results for `{target_domain}` in `{fname}`", parse_mode="Markdown")
 
     except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Error while searching: {e}")
+        bot.send_message(chat_id, f"⚠️ Error: {e}")
 
     finally:
-        found_lines_stream.close()
         send_main_menu(chat_id)
 
 # ---------------- RUN BOT ----------------
