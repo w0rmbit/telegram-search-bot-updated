@@ -75,6 +75,12 @@ def handle_url(message):
     except Exception as e:
         bot.send_message(chat_id, f"❌ Error downloading file: {e}")
 
+def make_progress_bar(percent, size=20):
+    """Creates a visual progress bar like ▓▓▓░░░ 50%"""
+    filled = int(size * percent / 100)
+    bar = "▓" * filled + "░" * (size - filled)
+    return f"[{bar}] {percent}%"
+
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == 'awaiting_domain')
 def handle_domain_and_search(message):
     chat_id = message.chat.id
@@ -86,7 +92,7 @@ def handle_domain_and_search(message):
         return
 
     total_lines = len(lines)
-    bot.send_message(chat_id, f"🔍 Searching for `{target_domain}` in {total_lines:,} lines... ⏳",
+    bot.send_message(chat_id, f"🔍 Searching for `{target_domain}` in {total_lines:,} lines...\n",
                      parse_mode="Markdown")
 
     found_lines_stream = io.BytesIO()
@@ -102,18 +108,20 @@ def handle_domain_and_search(message):
 
             if i % step == 0:
                 percent = int(i / total_lines * 100)
-                bot.send_message(chat_id, f"⏳ Progress: {percent}% (found {found_lines_count} so far)")
+                progress_bar = make_progress_bar(percent)
+                bot.send_message(chat_id, f"{progress_bar}\n"
+                                          f"📊 Found so far: {found_lines_count}")
 
         if found_lines_count > 0:
-            bot.send_message(chat_id, f"✅ Search complete! Found {found_lines_count} matches. Preparing file...")
+            bot.send_message(chat_id, f"✅ Search complete!\n📄 Total matches: *{found_lines_count}*",
+                             parse_mode="Markdown")
 
             found_lines_stream.seek(0)
             bot.send_document(
                 chat_id,
                 found_lines_stream,
                 visible_file_name=f"search_results_{target_domain}.txt",
-                caption=f"📄 Results for *{target_domain}*.\n\n"
-                        "👉 You can send another domain.",
+                caption=f"📄 Results for *{target_domain}*\n\n👉 You can send another domain.",
                 parse_mode="Markdown"
             )
         else:
