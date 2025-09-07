@@ -202,7 +202,6 @@ def handle_search_all(message):
     for fname, count in match_counts.items():
         summary_lines.append(f"- `{fname}`: {count} match{'es' if count != 1 else ''}")
     bot.send_message(chat_id, "\n".join(summary_lines), parse_mode="Markdown")
-
     if total_matches > 0:
         found_lines_stream.seek(0)
         bot.send_document(
