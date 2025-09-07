@@ -212,7 +212,7 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
                         text=f"📊 {percent}% done — found {found_lines_count}"
                     )
                     last_percent = percent
-            else:
+                        else:
                 if lines_processed % 5000 == 0:
                     bot.edit_message_text(
                         chat_id=chat_id,
@@ -220,7 +220,7 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
                         text=f"📊 Processed {lines_processed:,} lines — found {found_lines_count}"
                     )
 
-        # Final update
+        # Final update after loop finishes
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
