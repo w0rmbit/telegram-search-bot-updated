@@ -60,6 +60,10 @@ def handle_start(message):
 def callback_handler(call):
     chat_id = call.message.chat.id
 
+    # Safety check
+    if chat_id not in user_data:
+        reset_user(chat_id)
+
     if call.data == "upload_file":
         user_states[chat_id] = 'awaiting_url'
         bot.send_message(chat_id, "📤 Send me the file URL.")
@@ -118,6 +122,11 @@ def callback_handler(call):
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == 'awaiting_url')
 def handle_url(message):
     chat_id = message.chat.id
+
+    # Safety check
+    if chat_id not in user_data:
+        reset_user(chat_id)
+
     url = message.text.strip()
     if not url.startswith(('http://', 'https://')):
         bot.send_message(chat_id, "⚠️ Invalid URL. Must start with http:// or https://")
@@ -210,71 +219,4 @@ def handle_search_all(message):
         bot.send_message(chat_id, f"❌ No results for `{target_domain}` in any file.", parse_mode="Markdown")
 
     send_main_menu(chat_id)
-
-# --- Streaming Search with Progress ---
-def stream_search_with_live_progress(chat_id, url, target_domain, fname):
-    try:
-        progress_msg = bot.send_message(chat_id, "⏳ Starting search...")
-        response = requests.get(url, stream=True, timeout=(10, 60))
-        response.raise_for_status()
-
-        total_bytes = int(response.headers.get('Content-Length', 0))
-        bytes_read = 0
-        found_lines_count = 0
-        lines_processed = 0
-        found_lines_stream = io.BytesIO()
-
-        # Loosened regex: match anywhere in the line
-        pattern = re.compile(re.escape(target_domain), re.IGNORECASE)
-        last_percent = 0
-
-        for chunk in response.iter_lines(decode_unicode=True):
-            if not chunk:
-                continue
-            lines_processed += 1
-            bytes_read += len(chunk.encode('utf-8')) + 1
-
-            if pattern.search(chunk):
-                found_lines_stream.write((chunk + "\n").encode("utf-8"))
-                found_lines_count += 1
-
-            if total_bytes > 0:
-                percent = int((bytes_read / total_bytes) * 100)
-                if percent >= last_percent + 5:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=progress_msg.message_id,
-                        text=f"📊 {percent}% done — found {found_lines_count}"
-                    )
-                    last_percent = percent
-            else:
-                if lines_processed % 5000 == 0:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=progress_msg.message_id,
-                        text=f"📊 Processed {lines_processed:,} lines — found {found_lines_count}"
-                    )
-
-        # Final update after loop finishes
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=progress_msg.message_id,
-            text=f"✅ Search complete — found {found_lines_count} matches"
-        )
-
-        if found_lines_count > 0:
-            found_lines_stream.seek(0)
-            bot.send_document(
-                chat_id,
-                found_lines_stream,
-                visible_file_name=f"search_results_{target_domain}.txt",
-                caption=f"✅ Found {found_lines_count} matches for `{target_domain}` in `{fname}`",
-                parse_mode="Markdown"
-            )
-        else:
-            bot.send_message(chat_id, f"❌ No results for `{target_domain}` in `{fname}`", parse_mode="Markdown")
-
-    except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Error: {e}")
-    finally:
-        send_main_menu(chat_id)
+        
