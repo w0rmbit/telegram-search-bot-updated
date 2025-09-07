@@ -2,6 +2,7 @@ import os
 import re
 import io
 import threading
+import time
 import requests
 import telebot
 from flask import Flask
@@ -59,8 +60,6 @@ def handle_start(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     chat_id = call.message.chat.id
-
-    # Safety check
     if chat_id not in user_data:
         reset_user(chat_id)
 
@@ -122,8 +121,6 @@ def callback_handler(call):
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == 'awaiting_url')
 def handle_url(message):
     chat_id = message.chat.id
-
-    # Safety check
     if chat_id not in user_data:
         reset_user(chat_id)
 
@@ -219,4 +216,3 @@ def handle_search_all(message):
         bot.send_message(chat_id, f"❌ No results for `{target_domain}` in any file.", parse_mode="Markdown")
 
     send_main_menu(chat_id)
-        
