@@ -16,7 +16,7 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- Health Check Server (no Flask needed) ---
+# --- Health Check Server ---
 def run_healthcheck():
     port = int(os.environ.get("PORT", 8000))
     handler = http.server.SimpleHTTPRequestHandler
@@ -212,7 +212,7 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
                         text=f"📊 {percent}% done — found {found_lines_count}"
                     )
                     last_percent = percent
-                        else:
+            else:
                 if lines_processed % 5000 == 0:
                     bot.edit_message_text(
                         chat_id=chat_id,
