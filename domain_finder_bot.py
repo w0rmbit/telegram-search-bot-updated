@@ -4,8 +4,7 @@ import io
 import threading
 import requests
 import telebot
-import http.server
-import socketserver
+from flask import Flask
 from telebot import types
 
 # --- Telegram Bot Setup ---
@@ -16,13 +15,16 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- Health Check Server ---
-def run_healthcheck():
+# --- Flask App for Koyeb Health Check ---
+app = Flask(__name__)
+
+@app.route('/')
+def health():
+    return "OK", 200
+
+def run_flask():
     port = int(os.environ.get("PORT", 8000))
-    handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer(("", port), handler) as httpd:
-        print(f"Serving health check on port {port}")
-        httpd.serve_forever()
+    app.run(host="0.0.0.0", port=port)
 
 # --- Bot State ---
 user_states = {}
@@ -34,8 +36,7 @@ def reset_user(chat_id):
         'links': {
             'koyeb_default': "https://integral-trista-vnnmbs-5d76313f.koyeb.app/14084?hash=AgAD1A"
         },
-        'temp_url': None,
-        'search_history': []
+        'temp_url': None
     }
 
 # --- Main Menu ---
@@ -80,24 +81,8 @@ def callback_handler(call):
         choose_file_for_search(chat_id)
 
     elif call.data == "search_all":
-        history = user_data[chat_id].get('search_history', [])
-        if history:
-            markup = types.InlineKeyboardMarkup()
-            for term in history:
-                markup.add(types.InlineKeyboardButton(f"🔍 {term}", callback_data=f"use_history_all:{term}"))
-            markup.add(types.InlineKeyboardButton("✏️ New search term", callback_data="new_search_all"))
-            bot.send_message(chat_id, "Choose a previous search term or enter a new one:", reply_markup=markup)
-        else:
-            user_states[chat_id] = "awaiting_domain_all"
-            bot.send_message(chat_id, "🔎 Send me the domain to search across all files.")
-
-    elif call.data == "new_search_all":
         user_states[chat_id] = "awaiting_domain_all"
         bot.send_message(chat_id, "🔎 Send me the domain to search across all files.")
-
-    elif call.data.startswith("use_history_all:"):
-        term = call.data.split("use_history_all:")[1]
-        handle_search_all_with_term(chat_id, term)
 
     elif call.data == "delete":
         links = user_data.get(chat_id, {}).get('links', {})
@@ -175,11 +160,59 @@ def handle_domain_and_search(message):
         send_main_menu(chat_id)
         return
     target_domain = message.text.strip()
-    if target_domain not in user_data[chat_id]['search_history']:
-        user_data[chat_id]['search_history'].append(target_domain)
     stream_search_with_live_progress(chat_id, url, target_domain, fname)
 
-# --- Streaming Search (Single File) ---
+# --- Search All Files ---
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_domain_all")
+def handle_search_all(message):
+    chat_id = message.chat.id
+    target_domain = message.text.strip()
+    links = user_data.get(chat_id, {}).get('links', {})
+    if not links:
+        bot.send_message(chat_id, "⚠️ No files to search.")
+        send_main_menu(chat_id)
+        return
+
+    bot.send_message(chat_id, f"🔎 Searching for `{target_domain}` across {len(links)} files...", parse_mode="Markdown")
+    found_lines_stream = io.BytesIO()
+    total_matches = 0
+    match_counts = {}
+    pattern = re.compile(r'\b' + re.escape(target_domain) + r'\b', re.IGNORECASE)
+
+    for fname, url in links.items():
+        match_counts[fname] = 0
+        try:
+            response = requests.get(url, stream=True, timeout=(10, 60))
+            response.raise_for_status()
+            for line in response.iter_lines(decode_unicode=True):
+                if line and pattern.search(line):
+                    found_lines_stream.write(f"[{fname}] {line}\n".encode("utf-8"))
+                    match_counts[fname] += 1
+                    total_matches += 1
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Error searching `{fname}`: {e}")
+
+    # Build summary
+    summary_lines = [f"📊 Summary for `{target_domain}`:"]
+    for fname, count in match_counts.items():
+        summary_lines.append(f"- `{fname}`: {count} match{'es' if count != 1 else ''}")
+    bot.send_message(chat_id, "\n".join(summary_lines), parse_mode="Markdown")
+
+    if total_matches > 0:
+        found_lines_stream.seek(0)
+        bot.send_document(
+            chat_id,
+            found_lines_stream,
+            visible_file_name=f"search_all_{target_domain}.txt",
+            caption=f"✅ Found {total_matches} total matches across all files",
+            parse_mode="Markdown"
+        )
+    else:
+        bot.send_message(chat_id, f"❌ No results for `{target_domain}` in any file.", parse_mode="Markdown")
+
+    send_main_menu(chat_id)
+
+# --- Streaming Search with Progress ---
 def stream_search_with_live_progress(chat_id, url, target_domain, fname):
     try:
         progress_msg = bot.send_message(chat_id, "⏳ Starting search...")
@@ -188,8 +221,6 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
         total_bytes = int(response.headers.get('Content-Length', 0))
         bytes_read = 0
         found_lines_count = 0
-        lines_processed = 0
-        found_lines_stream = io.BytesIO()
         pattern = re.compile(r'\b' + re.escape(target_domain) + r'\b', re.IGNORECASE)
         last_percent = 0
 
@@ -220,7 +251,7 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
                         text=f"📊 Processed {lines_processed:,} lines — found {found_lines_count}"
                     )
 
-        # Final update after loop finishes
+        # Final update
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
@@ -241,5 +272,12 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
 
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Error: {e}")
+
     finally:
         send_main_menu(chat_id)
+
+# --- Run Flask + Bot ---
+if __name__ == '__main__':
+    print("🤖 Bot is running with Flask health check...")
+    threading.Thread(target=run_flask).start()
+    bot.polling(none_stop=True)
