@@ -4,7 +4,8 @@ import io
 import threading
 import requests
 import telebot
-from flask import Flask
+import http.server
+import socketserver
 from telebot import types
 
 # --- Telegram Bot Setup ---
@@ -15,16 +16,13 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- Flask App for Koyeb Health Check ---
-app = Flask(__name__)
-
-@app.route('/')
-def health():
-    return "OK", 200
-
-def run_flask():
+# --- Health Check Server (no Flask needed) ---
+def run_healthcheck():
     port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        print(f"Serving health check on port {port}")
+        httpd.serve_forever()
 
 # --- Bot State ---
 user_states = {}
@@ -181,95 +179,65 @@ def handle_domain_and_search(message):
         user_data[chat_id]['search_history'].append(target_domain)
     stream_search_with_live_progress(chat_id, url, target_domain, fname)
 
-# --- Search All Files ---
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "awaiting_domain_all")
-def handle_search_all(message):
-    chat_id = message.chat.id
-    target_domain = message.text.strip()
-    if target_domain not in user_data[chat_id]['search_history']:
-        user_data[chat_id]['search_history'].append(target_domain)
-    handle_search_all_with_term(chat_id, target_domain)
-
-def handle_search_all_with_term(chat_id, target_domain):
-    links = user_data.get(chat_id, {}).get('links', {})
-    if not links:
-        bot.send_message(chat_id, "⚠️ No files to search.")
-        send_main_menu(chat_id)
-        return
-
-    progress_msg = bot.send_message(chat_id, f"⏳ Starting search for `{target_domain}` across {len(links)} files...", parse_mode="Markdown")
-    found_lines_stream = io.BytesIO()
-    total_matches = 0
-    match_counts = {}
-    pattern = re.compile(r'\b' + re.escape(target_domain) + r'\b', re.IGNORECASE)
-
+# --- Streaming Search (Single File) ---
+def stream_search_with_live_progress(chat_id, url, target_domain, fname):
     try:
-        for idx, (fname, url) in enumerate(links.items(), start=1):
-            match_counts[fname] = 0
-            try:
-                response = requests.get(url, stream=True, timeout=(10, 60))
-                response.raise_for_status()
+        progress_msg = bot.send_message(chat_id, "⏳ Starting search...")
+        response = requests.get(url, stream=True, timeout=(10, 60))
+        response.raise_for_status()
+        total_bytes = int(response.headers.get('Content-Length', 0))
+        bytes_read = 0
+        found_lines_count = 0
+        lines_processed = 0
+        found_lines_stream = io.BytesIO()
+        pattern = re.compile(r'\b' + re.escape(target_domain) + r'\b', re.IGNORECASE)
+        last_percent = 0
 
-                total_bytes = int(response.headers.get('Content-Length', 0))
-                bytes_read = 0
-                lines_processed = 0
-                last_percent = 0
+        for chunk in response.iter_lines(decode_unicode=True):
+            if not chunk:
+                continue
+            lines_processed += 1
+            bytes_read += len(chunk.encode('utf-8')) + 1
 
-                for line in response.iter_lines(decode_unicode=True):
-                    if not line:
-                        continue
-                    lines_processed += 1
-                    bytes_read += len(line.encode('utf-8')) + 1
+            if pattern.search(chunk):
+                found_lines_stream.write((chunk + "\n").encode("utf-8"))
+                found_lines_count += 1
 
-                    if pattern.search(line):
-                        found_lines_stream.write(f"[{fname}] {line}\n".encode("utf-8"))
-                        match_counts[fname] += 1
-                        total_matches += 1
+            if total_bytes > 0:
+                percent = int((bytes_read / total_bytes) * 100)
+                if percent >= last_percent + 5:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=progress_msg.message_id,
+                        text=f"📊 {percent}% done — found {found_lines_count}"
+                    )
+                    last_percent = percent
+            else:
+                if lines_processed % 5000 == 0:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=progress_msg.message_id,
+                        text=f"📊 Processed {lines_processed:,} lines — found {found_lines_count}"
+                    )
 
-                    # Progress updates
-                    if total_bytes > 0:
-                        percent = int((bytes_read / total_bytes) * 100)
-                        if percent >= last_percent + 5:
-                            bot.edit_message_text(
-                                chat_id=chat_id,
-                                message_id=progress_msg.message_id,
-                                text=f"📂 File {idx}/{len(links)} — {fname}\n📊 {percent}% done — total matches so far: {total_matches}"
-                            )
-                            last_percent = percent
-                    else:
-                        if lines_processed % 5000 == 0:
-                            bot.edit_message_text(
-                                chat_id=chat_id,
-                                message_id=progress_msg.message_id,
-                                text=f"📂 File {idx}/{len(links)} — {fname}\n📊 Processed {lines_processed:,} lines — total matches so far: {total_matches}"
-                            )
-
-            except Exception as e:
-                bot.send_message(chat_id, f"⚠️ Error searching `{fname}`: {e}")
-
-        # Final summary
-        summary_lines = [f"📊 Summary for `{target_domain}`:"]
-        for fname, count in match_counts.items():
-            summary_lines.append(f"- `{fname}`: {count} match{'es' if count != 1 else ''}")
-
+        # Final update
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
-            text="\n".join(summary_lines),
-            parse_mode="Markdown"
+            text=f"✅ Search complete — found {found_lines_count} matches"
         )
 
-        if total_matches > 0:
+        if found_lines_count > 0:
             found_lines_stream.seek(0)
             bot.send_document(
                 chat_id,
                 found_lines_stream,
-                visible_file_name=f"search_all_{target_domain}.txt",
-                caption=f"✅ Found {total_matches} total matches across all files",
+                visible_file_name=f"search_results_{target_domain}.txt",
+                caption=f"✅ Found {found_lines_count} matches for `{target_domain}` in `{fname}`",
                 parse_mode="Markdown"
             )
         else:
-            bot.send_message(chat_id, f"❌ No results for `{target_domain}` in any file.", parse_mode="Markdown")
+            bot.send_message(chat_id, f"❌ No results for `{target_domain}` in `{fname}`", parse_mode="Markdown")
 
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Error: {e}")
