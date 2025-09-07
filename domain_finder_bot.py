@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import io
+from urllib.parse import urlparse
 from telebot import types
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -45,7 +46,7 @@ def callback_handler(call):
 
     if call.data == "upload_file":
         user_states[chat_id] = 'awaiting_url'
-        bot.send_message(chat_id, "📤 Send me the file URL.")
+        bot.send_message(chat_id, "📤 Send me the file URL (.txt, MediaFire, or direct link).")
 
     elif call.data == "search":
         if user_data.get(chat_id, {}).get('links'):
@@ -94,7 +95,6 @@ def handle_url(message):
         bot.send_message(chat_id, "⚠️ Invalid URL. Must start with http:// or https://")
         return
 
-    # Store URL temporarily until we get the name
     user_data[chat_id]['temp_url'] = url
     user_states[chat_id] = 'awaiting_filename'
     bot.send_message(chat_id, "✏️ What name do you want to give this file?")
@@ -114,7 +114,6 @@ def handle_filename(message):
         send_main_menu(chat_id)
         return
 
-    # Save link with custom name
     user_data[chat_id]['links'][file_name] = url
     bot.send_message(chat_id, f"✅ Link saved as `{file_name}`", parse_mode="Markdown")
     send_main_menu(chat_id)
@@ -141,8 +140,31 @@ def handle_domain_and_search(message):
     target_domain = message.text.strip()
     stream_search_with_live_progress(chat_id, url, target_domain, fname)
 
+# ---------------- LINK TYPE HANDLING ----------------
+def resolve_mediafire(url):
+    try:
+        page = requests.get(url, timeout=15)
+        page.raise_for_status()
+        match = re.search(r'href="(https://download[^"]+)"', page.text)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        print(f"MediaFire error: {e}")
+    return None
+
+# ---------------- STREAM SEARCH ----------------
 def stream_search_with_live_progress(chat_id, url, target_domain, fname):
     try:
+        # Resolve MediaFire links
+        if "mediafire.com" in url:
+            bot.send_message(chat_id, "🔍 Resolving MediaFire link...")
+            direct_url = resolve_mediafire(url)
+            if not direct_url:
+                bot.send_message(chat_id, "⚠️ Could not resolve MediaFire link.")
+                send_main_menu(chat_id)
+                return
+            url = direct_url
+
         progress_msg = bot.send_message(chat_id, "⏳ Starting search...")
 
         response = requests.get(url, stream=True, timeout=(10, 60))
@@ -161,7 +183,7 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
             if not chunk:
                 continue
             lines_processed += 1
-            bytes_read += len(chunk.encode('utf-8')) + 1  # +1 for newline
+            bytes_read += len(chunk.encode('utf-8')) + 1
 
             if pattern.search(chunk):
                 found_lines_stream.write((chunk + "\n").encode("utf-8"))
@@ -177,7 +199,6 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
                     )
                     last_percent = percent
             else:
-                # Fallback: update every 5000 lines
                 if lines_processed % 5000 == 0:
                     bot.edit_message_text(
                         chat_id=chat_id,
@@ -185,7 +206,6 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
                         text=f"📊 Processed {lines_processed:,} lines — found {found_lines_count}"
                     )
 
-        # Final update
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=progress_msg.message_id,
@@ -203,10 +223,8 @@ def stream_search_with_live_progress(chat_id, url, target_domain, fname):
             )
         else:
             bot.send_message(chat_id, f"❌ No results for `{target_domain}` in `{fname}`", parse_mode="Markdown")
-
     except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Error: {e}")
-
+        bot.send_message(chat_id, f"⚠️ Error during search: {e}")
     finally:
         send_main_menu(chat_id)
 
